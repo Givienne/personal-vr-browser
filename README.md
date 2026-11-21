@@ -96,27 +96,28 @@ not usable without appropriate provider authorization.
 
 ## Checking versions for contributions
 
-The library cannot inspect your headset from a web browser. An operator can
-compare a locally connected Quest's installed package versions against the
-cached catalog:
+Version comparison and contribution review do not require a headset, ADB, or sideloading.
+An administrator can provide a JSON manifest of package IDs and Android version codes
+from an independent, authorized source. The tools in contributions/ compare this
+manifest against the cached catalog, queue candidates for review, attach authorized
+local files, verify hashes, and prepare an offline submission manifest.
 
-```sh
-adb shell pm list packages --show-versioncode > installed.txt
-python3 version_audit.py --catalog ./data/catalog.json --installed installed.txt
-```
+The generic authorized_upload.py rclone adapter supports a provider-supplied
+upload configuration and an explicitly authorized destination, but real upload
+permission, naming requirements, and VRSRC acceptance still require provider
+confirmation. It does not automatically discover releases or upload anything
+from the public site. See contributions/README.md for the operator-only workflow.
 
-This produces a **local review list**, not an upload. Candidates must be checked
-manually. If you have approval and redistribution rights, use vrSrc's authorized
-upload workflow and its separately supplied `upload.config` for submissions.
-Never commit an `upload.config` or any submitted app packages. The program
-doesn't submit releases or upload files automatically.
+The older version_audit.py utility remains an optional way to compare an
+operator-provided Android package inventory; it is not required for normal use.
 
 ## Current limitations
 
 - vrSrc must explicitly approve server-side access and clarify whether invited
   friends may use the private website. No approval has been received yet.
-- The version checker is informational; integration with the provider's actual
-  contribution mechanism is not implemented. Do not claim that rule is met yet.
+- Version detection, private review, and a generic gated rclone transfer adapter
+  exist, but VRSRC's authorized upload protocol and acceptance remain unverified.
+  Do not claim that the provider's contribution requirement is met yet.
 - The upstream adapter hasn't been validated with a real approved API key.
 - Access controls are the responsibility of the reverse proxy; the application
   does not have user accounts. Restrict access before serving private files.
