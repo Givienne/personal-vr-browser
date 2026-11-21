@@ -47,3 +47,17 @@ Never copy another application's upload config or API credentials into this repo
 ## Remaining limitations
 
 Provider-specific upload configuration, naming rules, contribution acceptance, and permission for a shared download website remain unverified. This generic adapter does **not** by itself satisfy VRSRC's contribution requirement, and no real submissions have been made.
+
+## Additional APK checks (V5)
+
+An APK now must be a readable ZIP container with a nonempty \`AndroidManifest.xml\`,
+not simply a file renamed to \`.apk\`. This is a structural check, not proof
+that an APK is installable, trusted, or safe to redistribute. The **send**
+command additionally requires Android \`aapt2 dump badging\` to confirm the
+embedded package ID and versionCode match the approved queue record.
+Because provider-specific packaging rules are not known, actual uploads of
+ZIP/7Z/OBB files are currently blocked. They can still be reviewed locally;
+a provider-authorized format handler can be implemented later.
+
+The older synthetic text-file \`dummy.apk\` test deliberately fails V5's
+preflight. No upload config or real VRSRC endpoint has been used.

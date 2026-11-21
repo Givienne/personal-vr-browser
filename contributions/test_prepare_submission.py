@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from contribution_queue import add_candidates, load_queue, save_queue, sha256
 from prepare_submission import preflight, export
@@ -13,7 +14,9 @@ class TestPreflight(unittest.TestCase):
         self.q = self.root / 'queue.json'
         add_candidates(self.q, [{'package':'org.example.test','installed':5,'catalog':4,'reason':'newer version'}])
         self.f = self.root / 'myfile.apk'
-        self.f.write_bytes(b'test fixture, not a real apk')
+        with zipfile.ZipFile(self.f, 'w') as z:
+            z.writestr('AndroidManifest.xml', b'\x03\x00fixture')
+            z.writestr('classes.dex', b'fake dex')
 
     def approve(self):
         items = load_queue(self.q)
@@ -35,6 +38,12 @@ class TestPreflight(unittest.TestCase):
         self.approve()
         self.f.write_bytes(b'changed')
         with self.assertRaisesRegex(ValueError,'changed'):
+            preflight(load_queue(self.q))
+
+    def test_fake_apk_rejected_even_after_approval(self):
+        self.f.write_text('fake APK data')
+        self.approve()
+        with self.assertRaisesRegex(ValueError, 'Invalid APK'):
             preflight(load_queue(self.q))
 
     def test_output_cannot_overwrite(self):

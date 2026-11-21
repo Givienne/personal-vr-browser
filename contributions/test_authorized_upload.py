@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from authorized_upload import chosen_file, destination_remote, private_config, send_one
@@ -17,7 +18,9 @@ class TestUploadAdapter(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.queue = self.root / "queue.json"
         self.file = self.root / "owned.apk"
-        self.file.write_bytes(b"fixture not an APK")
+        with zipfile.ZipFile(self.file, 'w') as z:
+            z.writestr('AndroidManifest.xml', b'\x03\x00fixture')
+            z.writestr('classes.dex', b'fake dex')
         self.config = self.root / "upload.config"
         self.config.write_text("[approvedremote]\ntype = webdav\nurl = https://example.invalid\n")
         self.config.chmod(0o600)
@@ -102,9 +105,11 @@ class TestUploadAdapter(unittest.TestCase):
         class Result:
             returncode = 0
         with patch("authorized_upload.subprocess.run", return_value=Result()) as run, \
-             patch("authorized_upload.shutil.which", return_value="/usr/bin/rclone"):
+             patch("authorized_upload.shutil.which", return_value="/usr/bin/rclone"), \
+             patch("authorized_upload.require_apk_identity") as check_identity:
             self.send()
             run.assert_called_once()
+            check_identity.assert_called_once()
             argv = run.call_args.args[0]
             self.assertEqual(argv[3], "copyto")
             self.assertEqual(argv[5], self.destination)
@@ -125,7 +130,8 @@ class TestUploadAdapter(unittest.TestCase):
         class Result:
             returncode = 1
         with patch("authorized_upload.subprocess.run", return_value=Result()), \
-             patch("authorized_upload.shutil.which", return_value="/usr/bin/rclone"):
+             patch("authorized_upload.shutil.which", return_value="/usr/bin/rclone"), \
+             patch("authorized_upload.require_apk_identity"):
             with self.assertRaisesRegex(RuntimeError, "partial transfer"):
                 self.send()
         self.assertFalse(self.receipt.exists())

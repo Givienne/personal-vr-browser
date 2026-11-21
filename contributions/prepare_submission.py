@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import sys
 from contribution_queue import load_queue, sha256, PACKAGE
+from apk_validation import require_apk_container
 
 VALID_SUFFIXES = {'.apk', '.obb', '.zip', '.7z'}
 
@@ -41,6 +42,7 @@ def preflight(queue):
         actual = sha256(file)
         if actual != expected:
             raise ValueError(f'Attachment changed since review: {pkg} v{version}')
+        require_apk_container(file)
         approved.append({'package': pkg, 'versionCode': version, 'file': str(file.resolve()), 'sizeBytes': file.stat().st_size, 'sha256': actual})
     return approved
 

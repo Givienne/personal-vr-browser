@@ -21,6 +21,7 @@ import sys
 
 from contribution_queue import load_queue
 from prepare_submission import export, preflight
+from apk_validation import require_apk_identity
 
 REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -107,6 +108,7 @@ def send_one(*, queue: Path, package: str, version: int, upload_config: Path,
     remote = destination_remote(destination)
     config = private_config(upload_config, remote)
     item = chosen_file(queue, package, version)
+    require_apk_identity(item["file"], package, version)
     rclone = shutil.which("rclone")
     if not rclone:
         raise ValueError("rclone is not installed")
