@@ -32,3 +32,7 @@ __pycache__/
 *.bak
 *.backup
 *.log
+
+# vrSrc uploader credentials and local device inventories
+**/upload.config
+installed.txt

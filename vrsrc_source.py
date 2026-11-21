@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
@@ -23,6 +24,22 @@ SOURCE_FILE = Path(os.environ.get("VIALENNE_SOURCE_CONFIG", "/etc/vialenne-vr/Se
 MAX_META_BYTES = 150 * 1024 * 1024
 SAFE_NAME = re.compile(r"^[^/\\\x00-\x1f]{1,255}$")
 ARCHIVE_EXT = re.compile(r"(?:\.7z(?:\.\d+)?|\.zip|\.apk|\.obb|\.rar)$", re.IGNORECASE)
+
+# Remote directory listings are cached to avoid spawning an rclone process
+# for every open/refresh in the browser.
+_remote_lock = threading.Lock()
+_remote_cache = {}
+_next_remote_lookup = 0.0
+
+
+def provider_access_enabled() -> bool:
+    return os.environ.get("VRSRC_ACCESS_APPROVED") == "1" and bool(os.environ.get("VRSRC_API_KEY", "").strip())
+
+
+def rclone_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    env["RCLONE_HEADER"] = "X-API-Key: " + os.environ["VRSRC_API_KEY"].strip()
+    return env
 
 
 def read_source():
@@ -48,6 +65,8 @@ def read_source():
 def source_state(data_dir: Path):
     if not SOURCE_FILE.is_file():
         return {"state": "unconfigured", "name": "VRSRC"}
+    if not provider_access_enabled():
+        return {"state": "authorization_required", "name": "VRSRC"}
     status = data_dir / "source-status.json"
     try:
         state = json.loads(status.read_text("utf-8"))
@@ -90,7 +109,7 @@ def remote_directory(config, release_name: str) -> str:
 def sync_metadata(data_dir: Path, parse_gamelist, write_catalog, max_seconds=240):
     """Fetch one source's metadata. Never download game archives in this task."""
     config = read_source()
-    if config is None:
+    if config is None or not provider_access_enabled():
         return False
     data_dir.mkdir(parents=True, exist_ok=True)
     write_state(data_dir, "syncing")
@@ -105,7 +124,7 @@ def sync_metadata(data_dir: Path, parse_gamelist, write_catalog, max_seconds=240
             extract = base / "meta"
             extract.mkdir()
             cmd = [rclone, "copyto", ":http:/meta.7z", str(archive), *rclone_flags(config), "--timeout", "40s", "--retries", "2", "--max-transfer", "150M", "--cutoff-mode", "hard"]
-            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=max_seconds)
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=max_seconds, env=rclone_environment())
             if archive.stat().st_size > MAX_META_BYTES:
                 raise ValueError("Metadata archive exceeds the size limit")
             # `-p` without a password value causes 7z to ask on stdin rather than
@@ -143,20 +162,37 @@ def sync_metadata(data_dir: Path, parse_gamelist, write_catalog, max_seconds=240
 
 
 def list_remote_files(config: dict, release: str, package: str):
-    """List upstream archive parts on demand, never expose source credentials."""
-    if not config.get("allowDownloads") or not release:
+    """Bound and cache requests to the provider's directory listing endpoint."""
+    global _next_remote_lookup
+    if not provider_access_enabled() or not config.get("allowDownloads") or not release:
         return []
     rclone = shutil.which("rclone")
     if not rclone:
         return []
-    cmd = [rclone, "lsjson", remote_directory(config, release), *rclone_flags(config), "--max-depth", "1", "--timeout", "20s"]
+
+    key = (config["baseUri"], release, package)
+    now = time.monotonic()
+    with _remote_lock:
+        cached = _remote_cache.get(key)
+        if cached and cached[0] > now:
+            return list(cached[1])
+        if now < _next_remote_lookup:
+            return []
+        _next_remote_lookup = now + 2.0
+
+    cmd = [rclone, "lsjson", remote_directory(config, release), *rclone_flags(config), "--max-depth", "1", "--timeout", "20s", "--retries", "1"]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=35)
+        out = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=35, env=rclone_environment())
         rows = json.loads(out.stdout)
     except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        with _remote_lock:
+            _remote_cache[key] = (time.monotonic() + 60, [])
         return []
+
     items = []
     for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
         name = row.get("Name")
         size = row.get("Size", 0)
         if row.get("IsDir") or not isinstance(name, str) or not SAFE_NAME.fullmatch(name) or name in (".", "..") or not ARCHIVE_EXT.search(name):
@@ -164,10 +200,17 @@ def list_remote_files(config: dict, release: str, package: str):
         if not isinstance(size, int) or size < 0:
             continue
         items.append({"name": name, "size": size, "url": f"/api/remote/{quote(package, safe='')}/{quote(name, safe='')}"})
-    return sorted(items, key=lambda x: x["name"].lower())
+    items.sort(key=lambda x: x["name"].casefold())
+    with _remote_lock:
+        _remote_cache[key] = (time.monotonic() + 300, items)
+        if len(_remote_cache) > 1024:
+            # Cache size is capped even if a client browses the entire catalog.
+            for old_key in list(_remote_cache)[:256]:
+                del _remote_cache[old_key]
+    return list(items)
 
 
 def remote_url(config: dict, release_name: str, filename: str):
-    if not config.get("allowDownloads") or not isinstance(filename, str) or not SAFE_NAME.fullmatch(filename) or filename in (".", "..") or not ARCHIVE_EXT.search(filename):
+    if not provider_access_enabled() or not config.get("allowDownloads") or not isinstance(filename, str) or not SAFE_NAME.fullmatch(filename) or filename in (".", "..") or not ARCHIVE_EXT.search(filename):
         raise ValueError("Invalid remote file")
     return config["baseUri"] + source_hash(release_name) + "/" + quote(filename, safe="")

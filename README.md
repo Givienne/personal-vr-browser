@@ -68,10 +68,17 @@ The code includes an experimental adapter for a single configured metadata
 source. It reads `/etc/vialenne-vr/ServerInfo.json` on the server, never from
 browser input. It does **not** bundle a provider-issued API key, and it will
 not bypass upstream access restrictions. Automatic upstream synchronization
-will fail against services that require additional authorization. Remote
-file listing and relay are disabled unless the administrator explicitly sets
-`allowDownloads` in that config; enabling it does not grant permission to use
-a provider's content.
+will fail against services that require additional authorization. The service
+will not make upstream requests until both `VRSRC_ACCESS_APPROVED=1` and a
+provider-issued `VRSRC_API_KEY` are set in its private process environment.
+That approval flag is a local safeguard, not a substitute for permission.
+Remote file listing and relay additionally require `allowDownloads: true` in
+the server-side config and permission from the provider and rights holders.
+A listing is cached for five minutes; failed listings are cached for one minute.
+Requests to list new directories are spaced by at least two seconds, and only
+two remote transfers may run at a time. rclone also uses a one-request-per-second
+TPS limit. Failed metadata syncs retry after an hour rather than continuously.
+Never place environment secrets in the public repository.
 
 The repository intentionally omits server configuration, game files,
 credentials, cached catalogs and cover images.
@@ -87,17 +94,34 @@ credentials, cached catalogs and cover images.
 The optional upstream endpoints are in `app.py` and `vrsrc_source.py`, but are
 not usable without appropriate provider authorization.
 
+## Checking versions for contributions
+
+The library cannot inspect your headset from a web browser. An operator can
+compare a locally connected Quest's installed package versions against the
+cached catalog:
+
+```sh
+adb shell pm list packages --show-versioncode > installed.txt
+python3 version_audit.py --catalog ./data/catalog.json --installed installed.txt
+```
+
+This produces a **local review list**, not an upload. Candidates must be checked
+manually. If you have approval and redistribution rights, use vrSrc's authorized
+upload workflow and its separately supplied `upload.config` for submissions.
+Never commit an `upload.config` or any submitted app packages. The program
+doesn't submit releases or upload files automatically.
+
 ## Current limitations
 
-- Upstream authentication for providers requiring developer API keys is not
-  implemented yet.
-- Rate limiting and the provider's required update-contribution workflow need
-  to be completed before requesting production API access.
+- vrSrc must explicitly approve server-side access and clarify whether invited
+  friends may use the private website. No approval has been received yet.
+- The version checker is informational; integration with the provider's actual
+  contribution mechanism is not implemented. Do not claim that rule is met yet.
+- The upstream adapter hasn't been validated with a real approved API key.
 - Access controls are the responsibility of the reverse proxy; the application
-  does not have user accounts.
-- The current browser UI contains links to the operator's separate services;
-  these must be reviewed against any provider's external-link policy before an
-  application is submitted.
+  does not have user accounts. Restrict access before serving private files.
+- The browser UI contains no promotional or third-party links. External-link
+  restrictions still require the provider's interpretation for deployments.
 
 ## License
 

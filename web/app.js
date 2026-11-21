@@ -100,7 +100,7 @@ async function render(){
 function openGame(id,name){state.game={id,name};history.pushState({id,name},'',`?game=${encodeURIComponent(id)}`);render();}
 function sourceStatus(){fetch('/api/status',{cache:'no-store'}).then(r=>r.json()).then(s=>{
  const status=s.source||{};
- $('source-state').textContent=status.state==='ready'?'VRSRC catalog ready':status.state==='syncing'?'syncing VRSRC…':status.state==='error'?'source sync error':'VRSRC not configured';
+ $('source-state').textContent=status.state==='ready'?'VRSRC catalog ready':status.state==='syncing'?'syncing VRSRC…':status.state==='error'?'source sync error':status.state==='authorization_required'?'catalog offline · access pending':'VRSRC not configured';
 }).catch(()=>$('source-state').textContent='server offline');}
 function init(){
  $('browse-btn').onclick=goHome;$('tree-root').onclick=goHome;$('crumb-root').onclick=goHome;

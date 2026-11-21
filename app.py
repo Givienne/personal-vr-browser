@@ -197,6 +197,7 @@ class LibraryServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
+    remote_transfers = threading.BoundedSemaphore(2)
     server: LibraryServer
     protocol_version = "HTTP/1.1"
     server_version = "VialenneVR/2.0"
@@ -408,16 +409,19 @@ class Handler(BaseHTTPRequestHandler):
         game = next((g for g in load_games(self.server.data_dir, False) if g["id"] == package), None)
         if not game or not game.get("releaseName"):
             return self.error_json(404, "File not found", send_body)
+        if not self.remote_transfers.acquire(blocking=False):
+            return self.error_json(429, "Too many remote transfers", send_body)
+        response_started = False
         try:
             source = vrsrc_source.read_source()
-            if not source or not source.get("allowDownloads"):
+            if not vrsrc_source.provider_access_enabled() or not source or not source.get("allowDownloads"):
                 return self.error_json(403, "Remote downloads not enabled", send_body)
             # Re-check the server listing so guessed paths cannot be relayed.
             allowed = {f["name"] for f in vrsrc_source.list_remote_files(source, game["releaseName"], package)}
             if filename not in allowed:
                 return self.error_json(404, "File not found", send_body)
             url = vrsrc_source.remote_url(source, game["releaseName"], filename)
-            headers = {"User-Agent": "rclone/v1.66.0"}
+            headers = {"User-Agent": "personal-vr-browser", "X-API-Key": os.environ["VRSRC_API_KEY"].strip()}
             if self.headers.get("Range"):
                 headers["Range"] = self.headers["Range"]
             with urlopen(Request(url, headers=headers), timeout=35) as upstream:
@@ -440,15 +444,20 @@ class Handler(BaseHTTPRequestHandler):
                 if upstream.headers.get("Accept-Ranges"):
                     self.send_header("Accept-Ranges", upstream.headers["Accept-Ranges"])
                 self.end_headers()
+                response_started = True
                 if send_body:
                     shutil.copyfileobj(upstream, self.wfile, length=1024 * 1024)
         except Exception as exc:
             logging.warning("Upstream transfer failed: %s", type(exc).__name__)
-            if not self.wfile.closed:
+            if response_started:
+                self.close_connection = True
+            else:
                 try:
                     self.error_json(502, "Upstream download unavailable", send_body)
-                except Exception:
+                except (BrokenPipeError, ConnectionResetError):
                     pass
+        finally:
+            self.remote_transfers.release()
 
 
 def tryfloat(value: object) -> float:
@@ -482,9 +491,9 @@ def cli() -> int:
         def periodic_sync():
             # Only one fixed source. No importing, URL picker, or browser credentials.
             while True:
-                if vrsrc_source.SOURCE_FILE.is_file():
+                if vrsrc_source.SOURCE_FILE.is_file() and vrsrc_source.provider_access_enabled():
                     vrsrc_source.sync_metadata(args.data_dir, parse_gamelist, write_catalog)
-                time.sleep(4 * 60 * 60 if vrsrc_source.source_state(args.data_dir).get("state") == "ready" else 10 * 60)
+                time.sleep(4 * 60 * 60 if vrsrc_source.source_state(args.data_dir).get("state") == "ready" else 60 * 60)
         import time
         threading.Thread(target=periodic_sync, daemon=True, name="single-source-sync").start()
     print(f"Vialenne VR listening on http://{server.server_address[0]}:{server.server_address[1]} (demo={server.demo}, data={args.data_dir})", flush=True)

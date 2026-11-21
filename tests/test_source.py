@@ -19,7 +19,7 @@ class SingleSourceTests(unittest.TestCase):
                 self.assertFalse(src['allowDownloads'])
                 status=vs.source_state(data)
                 self.assertNotIn('password',json.dumps(status))
-                self.assertEqual(status['state'],'waiting')
+                self.assertEqual(status['state'],'authorization_required')
 
     def test_https_only_and_safe_file_names(self):
         with tempfile.TemporaryDirectory() as td:
@@ -29,7 +29,8 @@ class SingleSourceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):vs.read_source()
             base={'baseUri':'https://example.invalid/','allowDownloads':True}
             self.assertRegex(vs.source_hash('Sample VR'),'^[a-f0-9]{32}$')
-            self.assertTrue(vs.remote_url(base,'Sample VR','game.7z.001').startswith('https://example.invalid/'))
+            with patch.dict('os.environ', {'VRSRC_ACCESS_APPROVED':'1', 'VRSRC_API_KEY':'test-key'}):
+                self.assertTrue(vs.remote_url(base,'Sample VR','game.7z.001').startswith('https://example.invalid/'))
             with self.assertRaises(ValueError):vs.remote_url(base,'Sample VR','../../etc/passwd')
             with self.assertRaises(ValueError):vs.remote_url(base,'Sample VR','folder/abc.apk')
 
@@ -56,7 +57,7 @@ class SingleSourceTests(unittest.TestCase):
                     self.assertEqual(kwargs.get('input'), 'secret\n')
                     self.assertNotIn('secret', str(cmd))
                 return subprocess.CompletedProcess(cmd, 0, '', '')
-            with patch.object(vs,'SOURCE_FILE',cfg), patch.object(vs.shutil,'which',side_effect=lambda c:'/fake/bin/'+c), patch.object(vs.subprocess,'run',side_effect=fake_run):
+            with patch.object(vs,'SOURCE_FILE',cfg), patch.dict('os.environ', {'VRSRC_ACCESS_APPROVED':'1', 'VRSRC_API_KEY':'dummy-test-key'}), patch.object(vs.shutil,'which',side_effect=lambda c:'/fake/bin/'+c), patch.object(vs.subprocess,'run',side_effect=fake_run):
                 self.assertTrue(vs.sync_metadata(data,parse_gamelist,write_catalog))
             rows=json.loads((data/'catalog.json').read_text())
             self.assertEqual(len(rows),1)
