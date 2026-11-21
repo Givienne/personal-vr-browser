@@ -1,3 +1,4 @@
+# Credentials and local configuration
 .env
 .env.*
 **/ServerInfo.json
@@ -5,6 +6,7 @@
 *.pem
 *.p12
 
+# Catalog and download cache
 /data/
 /catalog.json
 /covers/
@@ -17,6 +19,7 @@
 *.zip
 *.db
 
+# Python and editor files
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -25,6 +28,7 @@ __pycache__/
 .vscode/
 .DS_Store
 
+# Backups and local test artifacts
 *.bak
 *.backup
 *.log

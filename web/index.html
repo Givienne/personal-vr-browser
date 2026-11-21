@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#16191a">
+  <title>Vialenne VR | vivid</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css?v=3">
+  <script src="/app.js?v=3" defer></script>
+</head>
+<body>
+  <div class="topline"><span><b>vivid</b> // VR library</span><span><span id="source-state">checking source</span> &nbsp; | &nbsp; <a href="https://vialenne.com/">vialenne.com</a></span></div>
+  <div class="toolbar" role="toolbar" aria-label="Library tools">
+    <button id="browse-btn" type="button">📂 Browse</button>
+    <button id="search-btn" type="button">🔎 Search</button>
+    <button id="reload-btn" type="button">🔄 Refresh</button>
+    <span class="toolbar-spacer"></span>
+    <a href="https://files.vialenne.com/">📁 Files</a>
+    <a href="https://vialenne.com/">⌂ Home</a>
+  </div>
+  <div class="shell">
+    <aside class="tree" aria-label="Folders">
+      <div class="tree-head">📦 VR Library <span class="tree-tools">＋　－</span></div>
+      <button class="tree-root" id="tree-root">[root]</button>
+    </aside>
+    <main class="main">
+      <nav class="crumb" aria-label="Breadcrumb"><button id="crumb-root">[root]</button><span id="crumb-tail"></span></nav>
+      <div class="controls"><label id="search-wrap" hidden>🔎 <input id="search-input" type="search" placeholder="search games..." autocomplete="off"></label><span class="sort-label">sort:</span><select id="sort-select" aria-label="Sort"><option value="name:asc">name</option><option value="updated:desc">newest</option><option value="size:desc">largest</option></select></div>
+      <section id="game-extra" class="game-header" hidden aria-label="Game details">
+        <div class="game-cover-box">
+          <img id="game-cover-image" alt="" width="180" height="180" hidden>
+          <span id="game-cover-placeholder" class="game-cover-placeholder" aria-hidden="true" hidden>📁</span>
+        </div>
+        <div class="game-details">
+          <h1 id="game-title"></h1>
+          <div id="game-meta"></div>
+          <p id="game-desc"></p>
+        </div>
+      </section>
+      <div class="listing" role="region" aria-label="Game files" tabindex="0">
+        <table id="files-table">
+          <thead><tr><th class="typecol">t</th><th class="namecol">File Name</th><th class="sizecol">Size</th><th>Version</th><th>Date</th></tr></thead>
+          <tbody id="files-body"><tr><td colspan="5" class="message">loading...</td></tr></tbody>
+        </table>
+      </div>
+      <div class="footer-line"><span id="count-text"></span><span class="pager"><button id="prev" hidden>‹ prev</button><span id="page-text"></span><button id="next" hidden>next ›</button></span></div>
+    </main>
+  </div>
+  <div id="notice" role="status" aria-live="polite"></div>
+</body>
+</html>
