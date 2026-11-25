@@ -58,3 +58,26 @@ def require_apk_identity(file, package, version, *, runner=None, aapt2=None):
     found_package, found_version = lines[0]
     if found_package != package or int(found_version) != version:
         raise ValueError('APK package/version does not match reviewed candidate')
+
+
+def inspect_apk(file, *, runner=None, aapt2=None):
+    """Discover the embedded Android package and numeric version without ADB."""
+    require_apk_container(file)
+    executable = aapt2 or shutil.which('aapt2')
+    if not executable:
+        raise ValueError('aapt2 is required for automatic APK version detection')
+    runner = runner or subprocess.run
+    try:
+        result = runner([executable, 'dump', 'badging', str(file)], capture_output=True,
+                        text=True, check=False, timeout=45)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError('Unable to inspect APK with aapt2') from exc
+    if result.returncode:
+        raise ValueError('aapt2 rejected APK')
+    matches = _BADGING.findall(result.stdout)
+    if len(matches) != 1:
+        raise ValueError('Unable to identify APK package/version')
+    package, version = matches[0]
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,119}', package):
+        raise ValueError('Invalid APK package identifier')
+    return package, int(version)

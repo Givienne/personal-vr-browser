@@ -1,7 +1,8 @@
-"""Single configured VR library source, based on CyberDeck's metadata conventions.
+"""VRSRC metadata adapter: runtime credentials, pinned HTTPS, conditional sync.
 
-The config is server-side only; never sent to the browser. Downloads are opt-in
-and must be allowed by the upstream provider and the content rights holder.
+Only the operator's background sync accesses the mirror. This module exposes no
+public remote listing or download APIs. Neither browser clients nor friends get
+access to the application's credential or the provider's mirror files.
 """
 from __future__ import annotations
 
@@ -15,31 +16,25 @@ import re
 import shutil
 import subprocess
 import tempfile
-import threading
 import time
-from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, build_opener
+
+from vrsrc_runtime import (AuthenticationUnavailable, MIRROR_ORIGIN,
+                           NoRedirects, credentials_enabled, runtime_keys)
 
 SOURCE_FILE = Path(os.environ.get("VIALENNE_SOURCE_CONFIG", "/etc/vialenne-vr/ServerInfo.json"))
 MAX_META_BYTES = 150 * 1024 * 1024
-SAFE_NAME = re.compile(r"^[^/\\\x00-\x1f]{1,255}$")
-ARCHIVE_EXT = re.compile(r"(?:\.7z(?:\.\d+)?|\.zip|\.apk|\.obb|\.rar)$", re.IGNORECASE)
-
-# Remote directory listings are cached to avoid spawning an rclone process
-# for every open/refresh in the browser.
-_remote_lock = threading.Lock()
-_remote_cache = {}
-_next_remote_lookup = 0.0
+METADATA_INTERVAL = 4 * 60 * 60  # check change before downloading again
+NO_VALIDATORS_DOWNLOAD_INTERVAL = 24 * 60 * 60
+META_STATE = "meta-probe.json"
+META_ARCHIVE = "meta.7z"
+_opener = build_opener(NoRedirects())
 
 
 def provider_access_enabled() -> bool:
-    return os.environ.get("VRSRC_ACCESS_APPROVED") == "1" and bool(os.environ.get("VRSRC_API_KEY", "").strip())
-
-
-def rclone_environment() -> dict[str, str]:
-    env = os.environ.copy()
-    env["RCLONE_HEADER"] = "X-API-Key: " + os.environ["VRSRC_API_KEY"].strip()
-    return env
+    return credentials_enabled()
 
 
 def read_source():
@@ -48,18 +43,18 @@ def read_source():
     data = json.loads(SOURCE_FILE.read_text("utf-8"))
     if not isinstance(data, dict):
         raise ValueError("Source configuration must be an object")
-    base = data.get("baseUri", "")
-    encoded = data.get("password", "")
-    if not isinstance(base, str) or not isinstance(encoded, str):
+    base, password = data.get("baseUri"), data.get("password", "")
+    if not isinstance(base, str) or not isinstance(password, str):
         raise ValueError("Source baseUri/password must be strings")
-    uri = urlsplit(base)
-    if uri.scheme != "https" or not uri.hostname or uri.username or uri.password or uri.query or uri.fragment:
-        raise ValueError("Source baseUri must be an https URL without credentials or query parameters")
-    # No secret is decoded or revealed until an actual sync.
-    if len(encoded) > 1000:
-        raise ValueError("Encoded password is too long")
-    return {"baseUri": base.rstrip("/") + "/", "password": encoded,
-            "allowDownloads": data.get("allowDownloads") is True}
+    parsed = urlsplit(base)
+    # Exact HTTPS origin: never a user-controlled mirror host or arbitrary port.
+    if (parsed.scheme != "https" or parsed.hostname != "go.srcdl1.xyz"
+            or parsed.netloc != "go.srcdl1.xyz" or parsed.path not in ("", "/")
+            or parsed.query or parsed.fragment):
+        raise ValueError("The only permitted mirror origin is https://go.srcdl1.xyz")
+    if len(password) > 1000:
+        raise ValueError("Archive password is too long")
+    return {"baseUri": MIRROR_ORIGIN + "/", "password": password}
 
 
 def source_state(data_dir: Path):
@@ -67,150 +62,215 @@ def source_state(data_dir: Path):
         return {"state": "unconfigured", "name": "VRSRC"}
     if not provider_access_enabled():
         return {"state": "authorization_required", "name": "VRSRC"}
-    status = data_dir / "source-status.json"
     try:
-        state = json.loads(status.read_text("utf-8"))
-        if state.get("state") in ("ready", "syncing", "error"):
-            return {k: v for k, v in state.items() if k in ("state", "name", "lastSync")}
+        obj = json.loads((data_dir / "source-status.json").read_text("utf-8"))
+        if obj.get("state") in ("ready", "syncing", "error"):
+            return {k: v for k, v in obj.items() if k in ("state", "name", "lastSync")}
     except (OSError, ValueError):
         pass
     return {"state": "waiting", "name": "VRSRC"}
 
 
 def write_state(data_dir: Path, state: str, last_sync: str | None = None):
-    tmp = data_dir / "source-status.json.tmp"
-    contents = {"state": state, "name": "VRSRC"}
+    obj = {"state": state, "name": "VRSRC"}
     if last_sync:
-        contents["lastSync"] = last_sync
-    tmp.write_text(json.dumps(contents), "utf-8")
-    os.replace(tmp, data_dir / "source-status.json")
+        obj["lastSync"] = last_sync
+    temp = data_dir / "source-status.json.tmp"
+    temp.write_text(json.dumps(obj), "utf-8")
+    os.replace(temp, data_dir / "source-status.json")
 
 
 def decoded_archive_password(config: dict) -> str:
     try:
-        return base64.b64decode(config["password"], validate=True).decode("utf-8")
-    except (ValueError, UnicodeDecodeError) as e:
-        raise ValueError("Invalid encoded archive password") from e
-
-
-def rclone_flags(config):
-    return ["--config", "/dev/null", "--http-url", config["baseUri"], "--tpslimit", "1.0", "--tpslimit-burst", "3"]
+        return base64.b64decode(config.get("password", ""), validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError("Invalid archive password") from exc
 
 
 def source_hash(release_name: str) -> str:
-    """VRCD public-endpoint convention: md5 of release name + LF."""
     return hashlib.md5((release_name + "\n").encode("utf-8")).hexdigest()
 
 
-def remote_directory(config, release_name: str) -> str:
-    return f":http:/{source_hash(release_name)}/"
+def _mirror_request(method: str, relative: str, headers: dict | None = None):
+    """Only one pinned mirror origin; never follow redirects, including after 403."""
+    if not provider_access_enabled():
+        raise AuthenticationUnavailable("VRSRC approval and runtime credentials required")
+    if relative != "/meta.7z":
+        raise ValueError("Only approved metadata resource is accessible by this adapter")
+    url = MIRROR_ORIGIN + relative
+    keys = runtime_keys()
+    for attempt in range(2):
+        key = keys.get()
+        request = Request(url, headers={**(headers or {}), "X-API-Key": key,
+                                        "User-Agent": "personal-vr-browser/1.2.3"}, method=method)
+        try:
+            response = _opener.open(request, timeout=45)
+            if response.geturl() != url:
+                response.close()
+                raise ValueError("Unexpected mirror response origin")
+            return response
+        except HTTPError as error:
+            if error.code == 304:
+                return error
+            if error.code == 403 and attempt == 0:
+                keys.invalidate(forbidden=True)
+                continue
+            raise
+    raise AuthenticationUnavailable("Mirror authentication rejected after refresh")
+
+
+def _probe_headers(data_dir: Path) -> dict:
+    try:
+        value = json.loads((data_dir / META_STATE).read_text("utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_probe(data_dir: Path, data: dict):
+    dest = data_dir / META_STATE
+    temp = data_dir / (META_STATE + ".tmp")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as file:
+        json.dump(data, file)
+    os.replace(temp, dest)
+
+
+def _same_validators(headers, state) -> bool:
+    etag = headers.get("ETag")
+    modified = headers.get("Last-Modified")
+    if etag is not None:
+        return bool(state.get("etag") and state["etag"] == etag)
+    if modified is not None:
+        return bool(state.get("lastModified") and state["lastModified"] == modified)
+    return False
+
+
+def _download_stream(response, path: Path) -> None:
+    size = 0
+    if int(response.headers.get("Content-Length", 0) or 0) > MAX_META_BYTES:
+        raise ValueError("Metadata archive exceeds size limit")
+    with path.open("xb") as target:
+        while chunk := response.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_META_BYTES:
+                raise ValueError("Metadata archive exceeds size limit")
+            target.write(chunk)
+    if not size:
+        raise ValueError("Metadata archive is empty")
+
+
+def _refresh_needed(data_dir: Path, meta: dict, now: float):
+    archive = data_dir / META_ARCHIVE
+    catalog = data_dir / "catalog.json"
+    if archive.is_file() and catalog.is_file() and now - float(meta.get("checkedAt", 0)) < METADATA_INTERVAL:
+        return False, None, meta
+    request_headers = {}
+    if archive.is_file() and catalog.is_file():
+        if meta.get("etag"):
+            request_headers["If-None-Match"] = meta["etag"]
+        elif meta.get("lastModified"):
+            request_headers["If-Modified-Since"] = meta["lastModified"]
+    try:
+        probe = _mirror_request("HEAD", "/meta.7z", request_headers)
+    except HTTPError as exc:
+        if exc.code != 405:
+            raise
+        # Some servers disable HEAD; a conditional GET provides equivalent checks.
+        probe = None
+    if probe is not None:
+        with probe:
+            if probe.status == 304 and archive.is_file() and catalog.is_file():
+                meta["checkedAt"] = now
+                _write_probe(data_dir, meta)
+                return False, None, meta
+            if archive.is_file() and catalog.is_file() and _same_validators(probe.headers, meta):
+                meta["checkedAt"] = now
+                _write_probe(data_dir, meta)
+                return False, None, meta
+            # If provider provides no validators, avoid a 150MB GET every 4h.
+            if (archive.is_file() and catalog.is_file() and not (probe.headers.get("ETag") or probe.headers.get("Last-Modified"))
+                    and now - float(meta.get("downloadedAt", 0)) < NO_VALIDATORS_DOWNLOAD_INTERVAL):
+                meta["checkedAt"] = now
+                _write_probe(data_dir, meta)
+                return False, None, meta
+            observed = {"etag": probe.headers.get("ETag"),
+                        "lastModified": probe.headers.get("Last-Modified")}
+    else:
+        observed = {}
+    return True, request_headers, {**meta, **observed}
 
 
 def sync_metadata(data_dir: Path, parse_gamelist, write_catalog, max_seconds=240):
-    """Fetch one source's metadata. Never download game archives in this task."""
+    """Maintainer-side metadata sync. Unchanged archives are not downloaded again."""
     config = read_source()
     if config is None or not provider_access_enabled():
         return False
     data_dir.mkdir(parents=True, exist_ok=True)
+    meta = _probe_headers(data_dir)
+    now = time.time()
+    try:
+        needed, conditional, meta = _refresh_needed(data_dir, meta, now)
+        if not needed:
+            return True
+    except Exception as exc:
+        logging.warning("Metadata change probe failed (%s)", type(exc).__name__)
+        return False
     write_state(data_dir, "syncing")
     try:
-        rclone = shutil.which("rclone")
-        sevenzip = shutil.which("7zz") or shutil.which("7z")
-        if not rclone or not sevenzip:
-            raise RuntimeError("Missing rclone or 7z (install rclone and p7zip-full)")
+        extractor = shutil.which("7zz") or shutil.which("7z")
+        if not extractor:
+            raise RuntimeError("7-Zip is required to extract metadata")
         with tempfile.TemporaryDirectory(prefix="vrsrc-", dir=data_dir) as work:
             base = Path(work)
-            archive = base / "meta.7z"
-            extract = base / "meta"
+            incoming = base / "meta.7z"
+            extract = base / "unpacked"
             extract.mkdir()
-            cmd = [rclone, "copyto", ":http:/meta.7z", str(archive), *rclone_flags(config), "--timeout", "40s", "--retries", "2", "--max-transfer", "150M", "--cutoff-mode", "hard"]
-            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=max_seconds, env=rclone_environment())
-            if archive.stat().st_size > MAX_META_BYTES:
-                raise ValueError("Metadata archive exceeds the size limit")
-            # `-p` without a password value causes 7z to ask on stdin rather than
-            # putting a secret in the process argv. Some 7z builds may not support
-            # piped prompts; fail closed rather than exposing the secret in ps.
+            response = _mirror_request("GET", "/meta.7z", conditional)
+            with response:
+                if response.status == 304:
+                    if (data_dir / META_ARCHIVE).is_file():
+                        meta["checkedAt"] = now
+                        _write_probe(data_dir, meta)
+                        write_state(data_dir, "ready")
+                        return True
+                    raise ValueError("Received 304 with no cached archive")
+                if response.status != 200:
+                    raise ValueError("Metadata request returned an unexpected status")
+                meta["etag"] = response.headers.get("ETag") or meta.get("etag")
+                meta["lastModified"] = response.headers.get("Last-Modified") or meta.get("lastModified")
+                _download_stream(response, incoming)
+            # The archive password is supplied by the provider's private configuration.
             password = decoded_archive_password(config)
-            cmd = [sevenzip, "x", "-y", "-p", str(archive), f"-o{extract}"]
-            subprocess.run(cmd, input=password + "\n", capture_output=True, text=True, check=True, timeout=90)
-            matches = [p for p in extract.rglob("*") if p.name.casefold().endswith("amelist.txt") and p.is_file() and not p.is_symlink()]
-            if not matches:
-                raise ValueError("Archive does not contain a GameList.txt")
-            entries, skipped = parse_gamelist(matches[0].read_text("utf-8-sig"))
+            subprocess.run([extractor, "x", "-y", "-p", str(incoming), f"-o{extract}"],
+                           input=password + "\n", capture_output=True, text=True,
+                           check=True, timeout=max_seconds)
+            gamelists = [p for p in extract.rglob("*")
+                         if p.is_file() and not p.is_symlink() and p.name.lower().endswith("amelist.txt")]
+            if len(gamelists) != 1:
+                raise ValueError("Expected exactly one game list")
+            entries, skipped = parse_gamelist(gamelists[0].read_text("utf-8-sig"))
             if not entries:
-                raise ValueError("Remote game list had no valid entries")
-            # Copy covers before replacing the previous catalog; never follow symlinks.
+                raise ValueError("Metadata archive contains no valid catalog entries")
             covers = data_dir / "covers"
             covers.mkdir(exist_ok=True)
             thumbdirs = [p for p in extract.rglob("thumbnails") if p.is_dir() and not p.is_symlink()]
             copied = 0
             for entry in entries:
-                for thumbdir in thumbdirs[:4]:
-                    candidate = thumbdir / (entry["id"] + ".jpg")
-                    if candidate.is_file() and not candidate.is_symlink() and candidate.stat().st_size <= 6 * 1024 * 1024:
-                        shutil.copyfile(candidate, covers / candidate.name)
+                for source in thumbdirs[:4]:
+                    file = source / (entry["id"] + ".jpg")
+                    if file.is_file() and not file.is_symlink() and file.stat().st_size <= 6 * 1024 * 1024:
+                        shutil.copyfile(file, covers / file.name)
                         copied += 1
                         break
             write_catalog(entries, data_dir)
-            logging.info("VRSRC: synchronized %d entries, %d covers, %d skipped", len(entries), copied, skipped)
+            os.replace(incoming, data_dir / META_ARCHIVE)
+            meta.update(checkedAt=now, downloadedAt=now)
+            _write_probe(data_dir, meta)
+            logging.info("VRSRC metadata updated: %s games, %s covers, %s skipped", len(entries), copied, skipped)
         write_state(data_dir, "ready", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         return True
     except Exception as exc:
-        logging.error("VRSRC sync failed (%s)", type(exc).__name__)
+        logging.error("VRSRC metadata sync failed (%s)", type(exc).__name__)
         write_state(data_dir, "error")
         return False
-
-
-def list_remote_files(config: dict, release: str, package: str):
-    """Bound and cache requests to the provider's directory listing endpoint."""
-    global _next_remote_lookup
-    if not provider_access_enabled() or not config.get("allowDownloads") or not release:
-        return []
-    rclone = shutil.which("rclone")
-    if not rclone:
-        return []
-
-    key = (config["baseUri"], release, package)
-    now = time.monotonic()
-    with _remote_lock:
-        cached = _remote_cache.get(key)
-        if cached and cached[0] > now:
-            return list(cached[1])
-        if now < _next_remote_lookup:
-            return []
-        _next_remote_lookup = now + 2.0
-
-    cmd = [rclone, "lsjson", remote_directory(config, release), *rclone_flags(config), "--max-depth", "1", "--timeout", "20s", "--retries", "1"]
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=35, env=rclone_environment())
-        rows = json.loads(out.stdout)
-    except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        with _remote_lock:
-            _remote_cache[key] = (time.monotonic() + 60, [])
-        return []
-
-    items = []
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict):
-            continue
-        name = row.get("Name")
-        size = row.get("Size", 0)
-        if row.get("IsDir") or not isinstance(name, str) or not SAFE_NAME.fullmatch(name) or name in (".", "..") or not ARCHIVE_EXT.search(name):
-            continue
-        if not isinstance(size, int) or size < 0:
-            continue
-        items.append({"name": name, "size": size, "url": f"/api/remote/{quote(package, safe='')}/{quote(name, safe='')}"})
-    items.sort(key=lambda x: x["name"].casefold())
-    with _remote_lock:
-        _remote_cache[key] = (time.monotonic() + 300, items)
-        if len(_remote_cache) > 1024:
-            # Cache size is capped even if a client browses the entire catalog.
-            for old_key in list(_remote_cache)[:256]:
-                del _remote_cache[old_key]
-    return list(items)
-
-
-def remote_url(config: dict, release_name: str, filename: str):
-    if not provider_access_enabled() or not config.get("allowDownloads") or not isinstance(filename, str) or not SAFE_NAME.fullmatch(filename) or filename in (".", "..") or not ARCHIVE_EXT.search(filename):
-        raise ValueError("Invalid remote file")
-    return config["baseUri"] + source_hash(release_name) + "/" + quote(filename, safe="")

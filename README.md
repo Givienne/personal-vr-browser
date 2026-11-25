@@ -64,21 +64,21 @@ no download-all endpoint.
 `/srv/storage/vr-library`. Configure your HTTPS reverse proxy separately and
 add authentication before allowing access to private files.
 
-The code includes an experimental adapter for a single configured metadata
-source. It reads `/etc/vialenne-vr/ServerInfo.json` on the server, never from
-browser input. It does **not** bundle a provider-issued API key, and it will
-not bypass upstream access restrictions. Automatic upstream synchronization
-will fail against services that require additional authorization. The service
-will not make upstream requests until both `VRSRC_ACCESS_APPROVED=1` and a
-provider-issued `VRSRC_API_KEY` are set in its private process environment.
-That approval flag is a local safeguard, not a substitute for permission.
-Remote file listing and relay additionally require `allowDownloads: true` in
-the server-side config and permission from the provider and rights holders.
-A listing is cached for five minutes; failed listings are cached for one minute.
-Requests to list new directories are spaced by at least two seconds, and only
-two remote transfers may run at a time. rclone also uses a one-request-per-second
-TPS limit. Failed metadata syncs retry after an hour rather than continuously.
-Never place environment secrets in the public repository.
+Provider access is **developer/maintainer-only**. The public HTTP server does not
+serve remote mirror files or remote directory listings, even to logged-in friends.
+Only separately authorized local files may be served through the local download
+endpoint. Cached metadata remains readable through the private catalog browser.
+
+The provider runtime client requests a short-lived key using a client ID and
+private build secret at POST https://vrsrc.fyi/api/mirror/app-key. It caches keys
+in memory, refreshes them after refreshAfter, retries once after a mirror 403,
+and backs off after an app-key 503. The build secret is never committed.
+The mirror is pinned to https://go.srcdl1.xyz with **no redirects**. A
+persisted meta.7z plus conditional HEAD avoids repeated 150-MB downloads.
+
+The source configuration lives in /etc/vialenne-vr/ServerInfo.json; credentials
+can be supplied only after approval via /etc/vialenne-vr/runtime.env (mode 0600,
+owned by root). Never check either file into Git.
 
 The repository intentionally omits server configuration, game files,
 credentials, cached catalogs and cover images.
@@ -91,38 +91,31 @@ credentials, cached catalogs and cover images.
 - `GET /covers/<package>` — cached artwork
 - `GET /api/download/<package>/<filename>` — locally hosted individual file
 
-The optional upstream endpoints are in `app.py` and `vrsrc_source.py`, but are
-not usable without appropriate provider authorization.
+There is no public remote mirror endpoint. Upstream metadata synchronization
+requires provider approval and developer-only runtime credentials.
 
-## Checking versions for contributions
+## Automatic, maintainer-only contributions
 
-Version comparison and contribution review do not require a headset, ADB, or sideloading.
-An administrator can provide a JSON manifest of package IDs and Android version codes
-from an independent, authorized source. The tools in contributions/ compare this
-manifest against the cached catalog, queue candidates for review, attach authorized
-local files, verify hashes, and prepare an offline submission manifest.
+The `contributions/auto_contribute.py` scanner discovers APK package IDs and
+version codes using `aapt2` in a private incoming directory. No headset, ADB,
+manually pasted inventory, or web upload is required. It compares discovered
+versions to the cached catalog. Repeated successful uploads are tracked locally.
 
-The generic authorized_upload.py rclone adapter supports a provider-supplied
-upload configuration and an explicitly authorized destination, but real upload
-permission, naming requirements, and VRSRC acceptance still require provider
-confirmation. It does not automatically discover releases or upload anything
-from the public site. See contributions/README.md for the operator-only workflow.
+Its default mode is **dry-run only**. Real contributions additionally require
+provider permission, a private provider-issued `upload.config`, explicit upload
+path rules, and opt-in flags. The exact VRSRC upload configuration and upload
+naming rules have **not** been issued. Until then, no uploads can be performed.
+See `contributions/README.md` for details.
 
-The older version_audit.py utility remains an optional way to compare an
-operator-provided Android package inventory; it is not required for normal use.
+## Known limitations
 
-## Current limitations
-
-- vrSrc must explicitly approve server-side access and clarify whether invited
-  friends may use the private website. No approval has been received yet.
-- Version detection, private review, and a generic gated rclone transfer adapter
-  exist, but VRSRC's authorized upload protocol and acceptance remain unverified.
-  Do not claim that the provider's contribution requirement is met yet.
-- The upstream adapter hasn't been validated with a real approved API key.
-- Access controls are the responsibility of the reverse proxy; the application
-  does not have user accounts. Restrict access before serving private files.
-- The browser UI contains no promotional or third-party links. External-link
-  restrictions still require the provider's interpretation for deployments.
+- VRSRC must approve the app before issuing a client ID and build secret.
+- The app does not grant friends the right to download through its developer key.
+- Automatic discovery is from an admin-owned APK staging directory, not from
+  unauthorized third-party download sources or a device.
+- VRSRC's official upload.config and destination path format are still needed.
+  A mock-tested provider uploader does not guarantee VRSRC acceptance.
+- The application must still be reviewed against VRSRC's own test fixtures.
 
 ## License
 

@@ -110,5 +110,11 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(status,404,path)
 
 
+    def test_public_mirror_relay_removed(self):
+        for path in ('/api/remote/org.example.orbital/game.apk',
+                     '/api/remote/org.example.orbital/anything.7z'):
+            status,_,_=self.request(path)
+            self.assertEqual(status,404,path)
+
 if __name__=='__main__':
     unittest.main(verbosity=2)

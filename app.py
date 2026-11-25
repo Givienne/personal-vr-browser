@@ -15,7 +15,6 @@ import shutil
 import sys
 import tempfile
 import threading
-from urllib.request import Request, urlopen
 import vrsrc_source
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -197,7 +196,6 @@ class LibraryServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    remote_transfers = threading.BoundedSemaphore(2)
     server: LibraryServer
     protocol_version = "HTTP/1.1"
     server_version = "VialenneVR/2.0"
@@ -294,11 +292,6 @@ class Handler(BaseHTTPRequestHandler):
             elif path.startswith("/api/games/"):
                 package = unquote(path[len("/api/games/"):])
                 self.game_detail(package, send_body)
-            elif path.startswith("/api/remote/"):
-                parts = path[len("/api/remote/"):].split("/")
-                if len(parts) != 2:
-                    return self.error_json(404, "File not found", send_body)
-                self.remote_download(unquote(parts[0]), unquote(parts[1]), send_body)
             elif path.startswith("/api/download/"):
                 parts = path[len("/api/download/"):].split("/")
                 if len(parts) != 2:
@@ -378,15 +371,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.error_json(404, "Game not found", send_body)
         out = self.enrich(game)
         out["files"] = get_files(self.server.data_dir, package, self.server.demo)
-        if not self.server.demo:
-            try:
-                source = vrsrc_source.read_source()
-                if source and source.get("allowDownloads") and game.get("releaseName"):
-                    remote = vrsrc_source.list_remote_files(source, game["releaseName"], package)
-                    known = {f["name"] for f in out["files"]}
-                    out["files"].extend(f for f in remote if f["name"] not in known)
-            except (OSError, ValueError, json.JSONDecodeError):
-                logging.warning("Could not read configured source")
         self.json_out(out, send_body)
 
     def download(self, package: str, filename: str, send_body: bool):
@@ -401,63 +385,6 @@ class Handler(BaseHTTPRequestHandler):
         if not file.is_file() or file.is_symlink():
             return self.error_json(404, "File not found", send_body)
         self.send_file(file, "application/octet-stream", send_body, filename)
-
-    def remote_download(self, package: str, filename: str, send_body: bool):
-        """Stream a file from the one configured source; never allow arbitrary URLs."""
-        if not safe_id(package) or not SAFE_FILE.fullmatch(filename):
-            return self.error_json(404, "File not found", send_body)
-        game = next((g for g in load_games(self.server.data_dir, False) if g["id"] == package), None)
-        if not game or not game.get("releaseName"):
-            return self.error_json(404, "File not found", send_body)
-        if not self.remote_transfers.acquire(blocking=False):
-            return self.error_json(429, "Too many remote transfers", send_body)
-        response_started = False
-        try:
-            source = vrsrc_source.read_source()
-            if not vrsrc_source.provider_access_enabled() or not source or not source.get("allowDownloads"):
-                return self.error_json(403, "Remote downloads not enabled", send_body)
-            # Re-check the server listing so guessed paths cannot be relayed.
-            allowed = {f["name"] for f in vrsrc_source.list_remote_files(source, game["releaseName"], package)}
-            if filename not in allowed:
-                return self.error_json(404, "File not found", send_body)
-            url = vrsrc_source.remote_url(source, game["releaseName"], filename)
-            headers = {"User-Agent": "personal-vr-browser", "X-API-Key": os.environ["VRSRC_API_KEY"].strip()}
-            if self.headers.get("Range"):
-                headers["Range"] = self.headers["Range"]
-            with urlopen(Request(url, headers=headers), timeout=35) as upstream:
-                status = upstream.status if upstream.status in (200, 206) else 502
-                if status == 502:
-                    return self.error_json(502, "Upstream download unavailable", send_body)
-                self.send_response(status)
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(filename, safe=""))
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("Cache-Control", "private, no-store")
-                length = upstream.headers.get("Content-Length")
-                if length and length.isdecimal():
-                    self.send_header("Content-Length", length)
-                else:
-                    self.send_header("Connection", "close")
-                    self.close_connection = True
-                if upstream.headers.get("Content-Range") and status == 206:
-                    self.send_header("Content-Range", upstream.headers["Content-Range"])
-                if upstream.headers.get("Accept-Ranges"):
-                    self.send_header("Accept-Ranges", upstream.headers["Accept-Ranges"])
-                self.end_headers()
-                response_started = True
-                if send_body:
-                    shutil.copyfileobj(upstream, self.wfile, length=1024 * 1024)
-        except Exception as exc:
-            logging.warning("Upstream transfer failed: %s", type(exc).__name__)
-            if response_started:
-                self.close_connection = True
-            else:
-                try:
-                    self.error_json(502, "Upstream download unavailable", send_body)
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-        finally:
-            self.remote_transfers.release()
 
 
 def tryfloat(value: object) -> float:
