@@ -1,63 +1,52 @@
-# Private Contribution Manager
+# Private contribution tools
 
-This directory contains an **administrator-only** version review and contribution workflow. The public Personal VR Browser remains a download-only website with no headset, ADB, sideloading, or visitor upload requirement.
+This folder is **admin-only**. Do not expose it as HTTP endpoints, share its
+configurations, or place its staging folder beneath the website's file root.
 
-Files:
-- detect_releases.py: compare administrator-provided package/versionCode data to the cached catalog.
-- contribution_queue.py: import candidates, attach files the administrator may contribute, review them, and calculate SHA-256.
-- prepare_submission.py: verify approved attachments and generate an offline review manifest.
-- authorized_upload.py: produce that offline plan, or use an explicitly authorized rclone configuration to transfer one approved file to a provider-specified destination.
+`auto_contribute.py` monitors a private directory of *authorized* local APK
+files. It discovers package/version metadata from each APK using Android's
+`aapt2 dump badging`, compares versions to the cached catalog, and identifies
+newer or unlisted packages without a headset, ADB, or a hand-written manifest.
 
-All operations except the gated send command are offline. The tools do not independently discover new releases, obtain permission to redistribute packages, or know VRSRC's official upload path or acceptance protocol.
+## Safe dry run (no credentials or network)
 
-## Local-only usage
+```bash
+python3 auto_contribute.py \
+  --catalog /private/catalog.json \
+  --incoming /private/authorized-apks \
+  --state /private/upload-state.json
+```
 
-Run the tests from this directory:
+The folder should be owned by the maintainer and mode `0700`. The default
+command **does not upload** and records no successful uploads. Use `--loop`
+with `--interval 3600` for automatic periodic discovery without uploads.
 
-    python3 -m unittest -v
+## Real provider contributions (disabled pending VRSRC instructions)
 
-Compare a provider-authorized local catalog with an operator-created JSON release manifest:
+`provider_upload.py` is deliberately not a generic send-anywhere CLI. It
+requires a provider-issued, private `upload.config` (mode 0600) and a separate
+private path-layout file that identifies the approved remote section and the
+provider's *actual* naming rules. The layout schema is:
 
-    python3 detect_releases.py --catalog /private/catalog.json --manifest /private/releases.json --output /private/candidates.json
+```json
+{"remote":"<provider-upload-config-section>",
+ "relativePathTemplate":"<provider-specified-directory>/{package}/{versionCode}/{filename}"}
+```
 
-Import, review, and attach files **only with the right to contribute them**:
+**This schema is a local adapter's mockable interface, not a VRSRC-provided
+schema.** Do not invent a production destination from this example. The
+provider's official remote, layout, and permission must be obtained first.
 
-    python3 contribution_queue.py --queue /private/queue.json import /private/candidates.json
-    python3 contribution_queue.py --queue /private/queue.json attach org.example.app 123 /private/owned-release.apk
-    python3 contribution_queue.py --queue /private/queue.json review org.example.app 123 approved
+Actual uploads also require `VRSRC_ACCESS_APPROVED=1`,
+`VRSRC_UPLOAD_AUTHORIZED=1`, and the CLI `--send` flag. The scanner uses
+`rclone copyto` for one file at a time, with low request pacing and immutable
+uploads; it records a successful transfer to prevent duplicates. This only
+means `rclone` succeeded, not that the provider accepted the contribution.
 
-Create a local plan:
+The previous CLI option accepting arbitrary `--destination` is removed.
+The rest of V5's manual queue/preflight tools remain available offline.
 
-    python3 authorized_upload.py plan --queue /private/queue.json --output /private/plan.json
-
-Nothing is uploaded by the plan command. It works without VRSRC credentials. Keep private data and receipts outside the public website and repository, in an owner-only directory.
-
-## Future authorized transfers
-
-The send command is **disabled unless** the operator explicitly confirms provider permission, sets both VRSRC_ACCESS_APPROVED=1 and VRSRC_UPLOAD_AUTHORIZED=1, supplies a private upload.config file, and specifies a destination that is explicitly permitted by that provider. Setting the local flags is **not** provider authorization.
-
-After receiving VRSRC's real authorization and destination instructions, the operator can use the CLI help:
-
-    python3 authorized_upload.py send --help
-
-Send uses rclone copyto for exactly one approved file per invocation, with one transfer and a one-request-per-second limit. It rechecks the file hash immediately before sending, never reads a configuration from the browser, and writes a private receipt after rclone reports success. A successful transfer alone does **not** prove VRSRC accepted the contribution. Investigate possible partial transfers before retrying.
-
-Never copy another application's upload config or API credentials into this repo or service. Only use provider-issued or otherwise explicitly authorized credentials and destinations.
-
-## Remaining limitations
-
-Provider-specific upload configuration, naming rules, contribution acceptance, and permission for a shared download website remain unverified. This generic adapter does **not** by itself satisfy VRSRC's contribution requirement, and no real submissions have been made.
-
-## Additional APK checks (V5)
-
-An APK now must be a readable ZIP container with a nonempty \`AndroidManifest.xml\`,
-not simply a file renamed to \`.apk\`. This is a structural check, not proof
-that an APK is installable, trusted, or safe to redistribute. The **send**
-command additionally requires Android \`aapt2 dump badging\` to confirm the
-embedded package ID and versionCode match the approved queue record.
-Because provider-specific packaging rules are not known, actual uploads of
-ZIP/7Z/OBB files are currently blocked. They can still be reviewed locally;
-a provider-authorized format handler can be implemented later.
-
-The older synthetic text-file \`dummy.apk\` test deliberately fails V5's
-preflight. No upload config or real VRSRC endpoint has been used.
+Only contribute content you own or have permission to redistribute. Never use
+unlicensed downloaded files to feed the scanner. No automatic discovery of
+new releases is possible if the private staging folder receives no new files;
+this is not a remote app-release tracker.

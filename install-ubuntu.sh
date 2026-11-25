@@ -36,6 +36,7 @@ Type=simple
 User=vialenne-vr
 Group=vialenne-vr
 WorkingDirectory=/opt/vialenne-vr
+EnvironmentFile=-/etc/vialenne-vr/runtime.env
 ExecStart=/usr/bin/python3 /opt/vialenne-vr/app.py --data-dir /srv/storage/vr-library serve --host 127.0.0.1 --port 4010
 Restart=on-failure
 RestartSec=4

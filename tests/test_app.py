@@ -63,6 +63,17 @@ class HttpTests(unittest.TestCase):
         except HTTPError as e:
             return e.code,e.headers,e.read()
 
+    def test_status_when_private_config_is_unreadable(self):
+        from unittest.mock import patch
+        with patch.object(app.vrsrc_source, 'SOURCE_FILE') as protected, \
+             patch.object(app.vrsrc_source, 'provider_access_enabled', return_value=False):
+            protected.is_file.side_effect = PermissionError("config is private")
+            status, _, body = self.request('/api/status')
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data['games'], 2)
+        self.assertEqual(data['source']['state'], 'authorization_required')
+
     def test_site_and_status(self):
         status,headers,content=self.request('/')
         self.assertEqual(status,200)
@@ -109,6 +120,12 @@ class HttpTests(unittest.TestCase):
             status,_,_=self.request(path)
             self.assertEqual(status,404,path)
 
+
+    def test_public_mirror_relay_removed(self):
+        for path in ('/api/remote/org.example.orbital/game.apk',
+                     '/api/remote/org.example.orbital/anything.7z'):
+            status,_,_=self.request(path)
+            self.assertEqual(status,404,path)
 
 if __name__=='__main__':
     unittest.main(verbosity=2)
