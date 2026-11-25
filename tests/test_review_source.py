@@ -36,6 +36,25 @@ class SourceTests(unittest.TestCase):
         self.data=Path(self.temp.name)
         self.config=self.data/'server.json'
 
+    def test_inaccessible_private_config_does_not_break_status(self):
+        from unittest.mock import Mock
+        protected = Mock()
+        protected.is_file.side_effect = PermissionError("config is private")
+        with patch.object(src, 'SOURCE_FILE', protected), \
+             patch.object(src, 'provider_access_enabled', return_value=False):
+            self.assertEqual(src.source_state(self.data),
+                             {"state": "authorization_required", "name": "VRSRC"})
+        with patch.object(src, 'SOURCE_FILE', protected), \
+             patch.object(src, 'provider_access_enabled', return_value=True):
+            self.assertEqual(src.source_state(self.data),
+                             {"state": "error", "name": "VRSRC"})
+
+    def test_disabled_sync_does_not_read_private_config(self):
+        with patch.object(src, 'provider_access_enabled', return_value=False), \
+             patch.object(src, 'read_source') as config:
+            self.assertFalse(src.sync_metadata(self.data, lambda _: ([],0), lambda *_:None))
+            config.assert_not_called()
+
     def test_only_exact_mirror_origin_accepted(self):
         bad=('https://elsewhere.invalid','https://go.srcdl1.xyz.evil.invalid',
              'https://go.srcdl1.xyz:1234','http://go.srcdl1.xyz',
