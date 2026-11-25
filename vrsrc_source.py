@@ -58,7 +58,14 @@ def read_source():
 
 
 def source_state(data_dir: Path):
-    if not SOURCE_FILE.is_file():
+    # A status request must never fail because a private maintainer config
+    # cannot be inspected by the current user (e.g. unprivileged test runs).
+    try:
+        configured = SOURCE_FILE.is_file()
+    except OSError:
+        return {"state": "error" if provider_access_enabled() else "authorization_required",
+                "name": "VRSRC"}
+    if not configured:
         return {"state": "unconfigured", "name": "VRSRC"}
     if not provider_access_enabled():
         return {"state": "authorization_required", "name": "VRSRC"}
@@ -203,8 +210,15 @@ def _refresh_needed(data_dir: Path, meta: dict, now: float):
 
 def sync_metadata(data_dir: Path, parse_gamelist, write_catalog, max_seconds=240):
     """Maintainer-side metadata sync. Unchanged archives are not downloaded again."""
-    config = read_source()
-    if config is None or not provider_access_enabled():
+    # Do not probe or read private provider config before access is approved.
+    if not provider_access_enabled():
+        return False
+    try:
+        config = read_source()
+    except (OSError, ValueError) as exc:
+        logging.warning("Source configuration unavailable (%s)", type(exc).__name__)
+        return False
+    if config is None:
         return False
     data_dir.mkdir(parents=True, exist_ok=True)
     meta = _probe_headers(data_dir)
